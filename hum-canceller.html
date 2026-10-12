@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hum Canceller</title>
+<style>
+:root{--bg:#10181c;--fg:#e6efe9;--mut:#8fa39b;--acc:#7fd1b9;--card:#18242a;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--bg:#eef3ef;--fg:#12201b;--mut:#51655d;--acc:#1f7a62;--card:#dde8e1}}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--fg);font-family:"Avenir Next","Segoe UI",system-ui,sans-serif}
+main{max-width:480px;margin:0 auto;padding:20px 20px 40px}
+h1{font-size:26px;font-weight:600;margin:8px 0 4px}
+p.sub{color:var(--mut);margin:0 0 18px;line-height:1.45;font-size:15px}
+#btn{width:100%;padding:16px;border-radius:14px;border:2px solid var(--acc);background:transparent;color:var(--fg);font-size:18px;margin-bottom:14px}
+#btn.on{background:var(--acc);color:#0b1a15}
+.row{background:var(--card);border-radius:14px;padding:14px 16px;margin-bottom:12px}
+.row label{display:flex;justify-content:space-between;font-size:15px;margin-bottom:6px}
+.row label span{color:var(--mut)}
+input[type=range]{width:100%;accent-color:var(--acc);height:32px}
+.big{font-size:34px;font-weight:600;letter-spacing:-1px}
+.tog{display:flex;justify-content:space-between;align-items:center;font-size:15px}
+.tog input{width:24px;height:24px;accent-color:var(--acc)}
+#meter{height:6px;border-radius:3px;background:var(--bg);margin-top:10px;overflow:hidden}
+#meter i{display:block;height:100%;width:0;background:var(--acc);transition:width .15s}
+ol{color:var(--mut);font-size:14px;line-height:1.55;padding-left:20px;margin:6px 0 0}
+.note{color:var(--mut);font-size:13px;line-height:1.5;margin-top:16px}
+</style>
+</head>
+<body>
+<main>
+<h1>Hum Canceller</h1>
+<p class="sub">Experimental. Cancels one steady low hum (engine, fan, AC) by playing its mirror image through your headphones.</p>
+<button id="btn">Start</button>
+
+<div class="row">
+<label>Hum detected <span id="st">listening…</span></label>
+<div class="big"><span id="hz">--</span> Hz</div>
+<div id="meter"><i></i></div>
+</div>
+
+<div class="row">
+<div class="tog"><span>Lock frequency</span><input id="lock" type="checkbox"></div>
+</div>
+
+<div class="row">
+<label>Phase (tune by ear) <span id="pv">180°</span></label>
+<input id="ph" type="range" min="0" max="359" value="180">
+</div>
+
+<div class="row">
+<label>Strength <span id="sv">30%</span></label>
+<input id="str" type="range" min="0" max="100" value="30">
+</div>
+
+<div class="row">
+<b style="font-size:15px">How to tune</b>
+<ol>
+<li>Put on your headphones, keep the phone near you, tap Start.</li>
+<li>Wait until the Hz reading stays steady, then turn on Lock.</li>
+<li>Raise Strength slowly, then slide Phase until the hum is quietest.</li>
+<li>Re-tune Phase if the hum comes back.</li>
+</ol>
+</div>
+
+<p class="note">Works only on one constant tone. Voices, traffic and changing sounds are not cancelled. Bluetooth delay is absorbed by the Phase slider. Keep volume low: a wrong setting can make the hum louder. On iPhones, connected headphones may switch to a lower-quality mic mode while this runs.</p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let ctx,mic,proc,an,stream,running=false,timer,wake;
+let f=100,locked=false,Xr=0,Xi=0,theta=0,amp=0,sCount=0,levelSm=0;
+const MAXAMP=0.4,TAU=Math.PI*2;
+const wrap=a=>{while(a>Math.PI)a-=TAU;while(a<-Math.PI)a+=TAU;return a};
+
+function detect(){
+  const buf=new Float32Array(an.frequencyBinCount);an.getFloatFrequencyData(buf);
+  const sr=ctx.sampleRate,bin=sr/an.fftSize;
+  const lo=Math.floor(40/bin),hi=Math.ceil(500/bin);
+  let pk=lo,mean=0;
+  for(let i=lo;i<=hi;i++){mean+=buf[i];if(buf[i]>buf[pk])pk=i}
+  mean/=(hi-lo+1);
+  const a=buf[pk-1],b=buf[pk],c=buf[pk+1],d=a-2*b+c;
+  const off=d!==0?0.5*(a-c)/d:0, fr=(pk+off)*bin;
+  const clear=b-mean>18&&b>-90;
+  if(clear){
+    $('st').textContent=locked?'locked':'tone found';
+    if(!locked)f=f===100&&!sCount?fr:f*.7+fr*.3;
+    $('hz').textContent=(locked?f:fr).toFixed(1);
+  }else{$('st').textContent='no steady tone';if(!locked)$('hz').textContent='--'}
+  $('meter').firstElementChild.style.width=Math.min(100,Math.max(0,(b+100)*1.4))+'%';
+}
+
+$('btn').onclick=async()=>{
+  if(running){stop();return}
+  $('st').textContent='starting…';
+  ctx=new (window.AudioContext||window.webkitAudioContext)();
+  ctx.resume();
+  try{
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error('This browser or page does not allow microphone access.');
+    stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+  }catch(e){ctx.close();ctx=null;$('st').textContent='mic blocked';alert('Could not use the microphone ('+(e.name||'error')+'). Allow the mic for this page, or open the page link directly in Safari/Chrome instead of inside another app.');return}
+  try{await ctx.resume()}catch(e){}
+  mic=ctx.createMediaStreamSource(stream);
+  an=ctx.createAnalyser();an.fftSize=32768;an.smoothingTimeConstant=.85;mic.connect(an);
+  proc=ctx.createScriptProcessor(1024,1,1);
+  Xr=Xi=0;theta=0;amp=0;sCount=0;
+  proc.onaudioprocess=e=>{
+    const x=e.inputBuffer.getChannelData(0),y=e.outputBuffer.getChannelData(0),N=x.length,sr=ctx.sampleRate;
+    const w=TAU*f/sr;let cr=0,ci=0;
+    const base=(w*sCount)%TAU;
+    for(let n=0;n<N;n++){const p=base+w*n;cr+=x[n]*Math.cos(p);ci-=x[n]*Math.sin(p)}
+    Xr=Xr*.85+cr*.15;Xi=Xi*.85+ci*.15;
+    const A=2*Math.hypot(Xr,Xi)/N, phi=Math.atan2(Xi,Xr);
+    const target=phi+(+$('ph').value)*Math.PI/180;
+    theta+=0.15*wrap(target-theta);
+    const mult=(+$('str').value/100)*3;
+    const tAmp=Math.min(MAXAMP,A*mult);
+    for(let n=0;n<N;n++){
+      amp+=(tAmp-amp)*0.002;
+      y[n]=amp*Math.cos(base+w*n+theta);
+    }
+    sCount+=N;
+  };
+  mic.connect(proc);proc.connect(ctx.destination);
+  timer=setInterval(detect,250);
+  try{wake=await navigator.wakeLock.request('screen')}catch(e){}
+  running=true;$('btn').textContent='Stop';$('btn').className='on';
+};
+function stop(){
+  clearInterval(timer);
+  try{proc.disconnect();mic.disconnect()}catch(e){}
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  if(ctx)ctx.close();
+  try{wake&&wake.release()}catch(e){}
+  running=false;$('btn').textContent='Start';$('btn').className='';$('st').textContent='stopped';
+}
+$('lock').onchange=()=>{locked=$('lock').checked;if(locked)$('st').textContent='locked'};
+$('ph').oninput=()=>$('pv').textContent=$('ph').value+'°';
+$('str').oninput=()=>$('sv').textContent=$('str').value+'%';
+</script>
+</body>
+</html>
