@@ -113,8 +113,8 @@ $('btn').onclick=async()=>{
     const A=2*Math.hypot(Xr,Xi)/N, phi=Math.atan2(Xi,Xr);
     const target=phi+(+$('ph').value)*Math.PI/180;
     theta+=0.15*wrap(target-theta);
-    const mult=(+$('str').value/100)*3;
-    const tAmp=Math.min(MAXAMP,A*mult);
+    const s=+$('str').value/100;
+    const tAmp=A>0.0015?MAXAMP*s*s:0;
     for(let n=0;n<N;n++){
       amp+=(tAmp-amp)*0.002;
       y[n]=amp*Math.cos(base+w*n+theta);
